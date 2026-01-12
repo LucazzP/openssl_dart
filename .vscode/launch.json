@@ -1,0 +1,23 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "openssl",
+      "request": "launch",
+      "type": "dart"
+    },
+    {
+      "name": "Debug Build Hook",
+      "type": "dart",
+      "request": "launch",
+      "program": "hook/build.dart",
+      "args": [
+        "--config",
+        ".dart_tool/hooks_runner/openssl/9fb02c5622aea66c3a53a942a16bf409/input.json"
+      ]
+    }
+  ]
+}
