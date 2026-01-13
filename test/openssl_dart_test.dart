@@ -7,7 +7,11 @@ import 'package:openssl/openssl.dart' as openssl;
 import 'package:test/test.dart';
 
 void main() {
-  group('A group of tests', () {
+  group('OpenSSL', () {
+    test('Have the correct version', () {
+      final version = '${openssl.OPENSSL_version_major()}.${openssl.OPENSSL_version_minor()}.${openssl.OPENSSL_version_patch()}';
+      expect(version, equals('3.5.4'));
+    });
     group('AES', () {
       test('encrypt/decrypt roundtrip', () {
         final key = utf8.encode('Nc92PMoPjcIls5QoXeki5yIPuhjjWMcx');

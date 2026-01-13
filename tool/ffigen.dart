@@ -15,6 +15,9 @@ void main() {
   final headers = <Uri>[];
   final compilerOpts = [...defaultCompilerOpts(logger), '-I${opensslInclude.toFilePath()}'];
 
+  // Filter out implementation-reserved identifiers that start with '_'.
+  bool allowPublic(Declaration decl) => !decl.originalName.startsWith('_');
+
   for (final entry in Directory(opensslPublic.path).listSync(recursive: true)) {
     if (entry.path.endsWith('.h')) {
       headers.add(entry.uri);
@@ -23,20 +26,10 @@ void main() {
 
   FfiGenerator(
     headers: Headers(entryPoints: headers, compilerOptions: compilerOpts),
-    functions: Functions.includeSet({
-      'EVP_CIPHER_CTX_new',
-      'EVP_EncryptInit_ex',
-      'EVP_aes_256_cbc',
-      'EVP_DecryptInit_ex',
-      'EVP_EncryptUpdate',
-      'EVP_DecryptUpdate',
-      'EVP_EncryptFinal_ex',
-      'EVP_DecryptFinal_ex',
-      'EVP_CIPHER_CTX_free',
-    }),
-    macros: Macros.includeSet({'EVP_MAX_BLOCK_LENGTH'}),
-    output: Output(
-      dartFile: packageRoot.resolve('lib/src/third_party/openssl.g.dart'),
-    ),
+    functions: Functions(include: allowPublic),
+    macros: Macros(include: allowPublic),
+    globals: Globals(include: allowPublic),
+    enums: Enums(include: allowPublic),
+    output: Output(dartFile: packageRoot.resolve('lib/src/third_party/openssl.g.dart')),
   ).generate(logger: logger);
 }
