@@ -2,51 +2,75 @@ import 'dart:io';
 
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
+import 'package:logging/logging.dart';
+import 'package:native_toolchain_c/src/cbuilder/compiler_resolver.dart';
 
 const version = '3.5.4';
 const sourceCodeUrl = 'https://github.com/openssl/openssl/releases/download/openssl-$version/openssl-$version.tar.gz';
 const openSslDirName = 'openssl-$version';
 const configArgs = ['no-unit-test', 'no-asm', 'no-makedepend', 'no-ssl', 'no-apps', '-Wl,-headerpad_max_install_names'];
+// 'no-unit-test no-asm no-makedepend no-ssl no-apps -Wl,-headerpad_max_install_names'
+const perlDownloadUrl = 'https://strawberryperl.com/download/5.14.2.1/strawberry-perl-5.14.2.1-64bit-portable.zip';
+const jomDownloadUrl = 'https://download.qt.io/official_releases/jom/jom_1_1_5.zip';
+
+Map<String, String> environment = {};
 
 void main(List<String> args) async {
   await build(args, (input, output) async {
     if (input.config.buildCodeAssets) {
-      final workDir = Directory(input.outputDirectory.path);
-      final outputDir = Directory(input.outputDirectoryShared.path);
+      final workDir = input.outputDirectory;
+      final outputDir = input.outputDirectoryShared;
 
       // download source code from openssl
-      await runProcess('curl', ['-L', sourceCodeUrl, '-o', '$openSslDirName.tar.gz'], workingDirectory: workDir);
+      await downloadAndExtract(sourceCodeUrl, '$openSslDirName.tar.gz', workDir, createFolderForExtraction: false);
 
-      // unzip source code
-      await runProcess('tar', ['-xzf', '$openSslDirName.tar.gz'], workingDirectory: workDir);
-      // remove the tar.gz file
-      await File(workDir.uri.resolve('$openSslDirName.tar.gz').toFilePath()).delete();
-
-      final openSslDir = Directory(workDir.uri.resolve(openSslDirName).path);
+      final openSslDir = workDir.resolve('$openSslDirName/');
 
       // build source code, depends on the OS we are running on
       // Read https://github.com/openssl/openssl/blob/openssl-3.5.4/INSTALL.md#building-openssl
       final configName = resolveConfigName(input.config.code.targetOS, input.config.code.targetArchitecture);
       switch (OS.current) {
         case OS.windows:
+          final msvcEnv = await resolveWindowsBuildEnvironment(input.config.code.targetArchitecture);
+          // should have perl and jom installed
+          final needDownloadPerl = !await isProgramInstalled('perl');
+          final needDownloadJom = !await isProgramInstalled('jom');
+          var perlProgram = 'perl';
+          var jomProgram = 'jom';
+
+          if (needDownloadPerl) {
+            await downloadAndExtract(perlDownloadUrl, 'perl.zip', workDir);
+            perlProgram = workDir.resolve('./perl/perl/bin/perl.exe').toFilePath(windows: Platform.isWindows);
+          }
+          if (needDownloadJom) {
+            await downloadAndExtract(jomDownloadUrl, 'jom.zip', workDir);
+            jomProgram = workDir.resolve('./jom/jom.exe').toFilePath(windows: Platform.isWindows);
+          }
+
           // run ./Configure with the target OS and architecture
-          await runProcess('perl', [
-            'Configure',
-            configName,
-            ...configArgs,
-            // needed to build using multiple threads on Windows
-            '/FS',
-          ], workingDirectory: openSslDir);
+          await runProcess(
+            perlProgram,
+            [
+              'Configure',
+              configName,
+              ...configArgs,
+              // needed to build using multiple threads on Windows
+              '/FS',
+            ],
+            workingDirectory: openSslDir,
+            extraEnvironment: msvcEnv,
+          );
 
           // run jom to build the library
-          await runProcess('jom', [
-            // TODO: don't know if this is needed
-            // 'build_sw',
-            '-j',
-            '${Platform.numberOfProcessors}',
-            '-c',
-            'user.openssl:windows_use_jom=True',
-          ], workingDirectory: openSslDir);
+          await runProcess(jomProgram, ['-j', '${Platform.numberOfProcessors}'], workingDirectory: openSslDir, extraEnvironment: msvcEnv);
+
+          // delete perl and jom if downloaded
+          if (needDownloadPerl) {
+            await Directory(workDir.resolve('perl').toFilePath(windows: Platform.isWindows)).delete(recursive: true);
+          }
+          if (needDownloadJom) {
+            await Directory(workDir.resolve('jom').toFilePath(windows: Platform.isWindows)).delete(recursive: true);
+          }
           break;
         case OS.macOS:
         case OS.linux:
@@ -60,10 +84,10 @@ void main(List<String> args) async {
 
       // copy the library to the output directory
       final libName = switch ((input.config.code.targetOS, input.config.code.linkModePreference)) {
-        (OS.windows, LinkModePreference.static || LinkModePreference.preferStatic) => 'libcrypto.lib',
+        (OS.windows, LinkModePreference.static || LinkModePreference.preferStatic) => 'libcrypto_static.lib',
         (OS.macOS, LinkModePreference.static || LinkModePreference.preferStatic) => 'libcrypto.a',
         (OS.linux, LinkModePreference.static || LinkModePreference.preferStatic) => 'libcrypto.a',
-        (OS.windows, LinkModePreference.dynamic || LinkModePreference.preferDynamic) => 'libcrypto.dll',
+        (OS.windows, LinkModePreference.dynamic || LinkModePreference.preferDynamic) => 'libcrypto-3-${input.config.code.targetArchitecture.name}.dll',
         (OS.macOS, LinkModePreference.dynamic || LinkModePreference.preferDynamic) => 'libcrypto.dylib',
         (OS.linux, LinkModePreference.dynamic || LinkModePreference.preferDynamic) => 'libcrypto.so',
         _ => throw UnsupportedError(
@@ -71,11 +95,11 @@ void main(List<String> args) async {
         ),
       };
 
-      final libPath = outputDir.uri.resolve(libName).toFilePath();
-      await File(openSslDir.uri.resolve(libName).path).copy(libPath);
+      final libPath = outputDir.resolve(libName).toFilePath(windows: Platform.isWindows);
+      await File(openSslDir.resolve(libName).toFilePath(windows: Platform.isWindows)).copy(libPath);
 
       // delete the source code
-      await openSslDir.delete(recursive: true);
+      await Directory(openSslDir.toFilePath(windows: Platform.isWindows)).delete(recursive: true);
 
       // add the library to dart code assets
       output.assets.code.add(
@@ -83,7 +107,7 @@ void main(List<String> args) async {
           package: input.packageName,
           name: 'src/third_party/openssl.g.dart',
           linkMode: libName.linkMode,
-          file: outputDir.uri.resolve(libName),
+          file: outputDir.resolve(libName),
         ),
       );
     }
@@ -96,6 +120,15 @@ extension on String {
       return DynamicLoadingBundled();
     }
     return StaticLinking();
+  }
+}
+
+Future<bool> isProgramInstalled(String programName) async {
+  try {
+    await runProcess(programName, []);
+    return true;
+  } catch (e) {
+    return false;
   }
 }
 
@@ -132,13 +165,65 @@ String resolveConfigName(OS os, Architecture architecture) {
   };
 }
 
-Future<void> runProcess(String executable, List<String> arguments, {Directory? workingDirectory}) async {
-  final processResult = await Process.run(executable, arguments, workingDirectory: workingDirectory?.path);
+Future<Map<String, String>> resolveWindowsBuildEnvironment(Architecture architecture) async {
+  final result = await runProcess('cmd.exe', [
+    '/c',
+    r'call C:\"Program Files"\"Microsoft Visual Studio"\2022\Community\VC\Auxiliary\Build\vcvars64.bat >nul && set',
+  ]);
+
+  return Map.fromEntries(
+    result.trim().split('\n').map((line) {
+      final parts = line.split('=');
+      if (parts.length != 2) {
+        return null;
+      }
+      return MapEntry(parts[0].trim(), parts[1].trim());
+    }).nonNulls,
+  );
+}
+
+Future<String> runProcess(
+  String executable,
+  List<String> arguments, {
+  Uri? workingDirectory,
+  Map<String, String>? extraEnvironment,
+}) async {
+  final processResult = await Process.run(
+    executable,
+    arguments,
+    workingDirectory: workingDirectory?.toFilePath(windows: Platform.isWindows),
+    environment: {...?extraEnvironment, ...environment},
+    includeParentEnvironment: true,
+  );
   print(processResult.stdout);
   if ((processResult.stderr as String).isNotEmpty) {
     print(processResult.stderr);
   }
   if (processResult.exitCode != 0) {
-    throw ProcessException(executable, arguments, '', processResult.exitCode);
+    throw ProcessException(executable, arguments, processResult.stderr, processResult.exitCode);
   }
+  return processResult.stdout.toString();
+}
+
+Future<void> downloadAndExtract(
+  String url,
+  String outputFileName,
+  Uri workDir, {
+  bool createFolderForExtraction = true,
+}) async {
+  // download the file
+  await runProcess('curl', ['-L', url, '-o', outputFileName], workingDirectory: workDir);
+
+  // unzip the file
+  final isTarGz = outputFileName.endsWith('.tar.gz');
+  final destinationPath = workDir.resolve(outputFileName.replaceAll('.tar.gz', '').replaceAll('.zip', ''));
+  await Directory(destinationPath.toFilePath(windows: Platform.isWindows)).create(recursive: true);
+  await runProcess('tar', [
+    isTarGz ? '-xzf' : '-xf',
+    outputFileName,
+    if (createFolderForExtraction) ...['-C', destinationPath.toFilePath(windows: Platform.isWindows)],
+  ], workingDirectory: workDir);
+
+  // remove the tar.gz file
+  await File(workDir.resolve(outputFileName).toFilePath(windows: Platform.isWindows)).delete();
 }
